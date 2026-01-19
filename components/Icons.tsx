@@ -25,7 +25,15 @@ import {
   X,
   PanelRight,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  ChevronDown,
+  ChevronUp,
+  ArrowUpDown,
+  Timer,
+  ShieldCheck,
+  UserCog,
+  Bell,
+  Info
 } from 'lucide-react';
 
 export {
@@ -55,5 +63,13 @@ export {
   X,
   PanelRight,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  ChevronDown,
+  ChevronUp,
+  ArrowUpDown,
+  Timer,
+  ShieldCheck,
+  UserCog,
+  Bell,
+  Info
 };

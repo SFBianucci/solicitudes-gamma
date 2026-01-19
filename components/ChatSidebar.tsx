@@ -8,11 +8,13 @@ interface ChatSidebarProps {
   onClose?: () => void; // Optional prop to handle closing on mobile
 }
 
+// Fixed missing Role.ADMIN mapping in RoleColors
 const RoleColors: Record<Role, string> = {
   [Role.COORDINATOR]: 'text-blue-600',
   [Role.ADMISSION]: 'text-purple-600',
   [Role.HOUSEKEEPING]: 'text-orange-600',
   [Role.NURSING]: 'text-emerald-600',
+  [Role.ADMIN]: 'text-slate-900',
 };
 
 export const ChatSidebar: React.FC<ChatSidebarProps> = ({ messages, onClose }) => {

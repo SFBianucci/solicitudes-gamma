@@ -1,10 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   WorkflowType, 
   Role, 
   Ticket, 
   TicketStatus, 
-  ChatMessage 
+  ChatMessage,
+  User,
+  Notification,
+  NotificationType
 } from './types';
 import { ChatSidebar } from './components/ChatSidebar';
 import { StatusBadge } from './components/StatusBadge';
@@ -26,7 +29,16 @@ import {
   X,
   PanelRightClose,
   PanelRightOpen,
-  MessageSquare
+  MessageSquare,
+  ArrowUpDown,
+  ChevronUp,
+  ChevronDown,
+  Clock,
+  Timer,
+  ShieldCheck,
+  UserCog,
+  Bell,
+  Info
 } from './components/Icons';
 
 // UI Components
@@ -78,8 +90,41 @@ const HOSPITAL_LOCATIONS = [
   "Quirófano Central"
 ];
 
+const ROLE_LABELS: Record<Role, string> = {
+  [Role.ADMIN]: 'Administrador',
+  [Role.COORDINATOR]: 'Coordinador',
+  [Role.ADMISSION]: 'Admisión',
+  [Role.HOUSEKEEPING]: 'Higiene',
+  [Role.NURSING]: 'Enfermería',
+};
+
+const INITIAL_USERS: User[] = [
+  { id: 'USR-001', name: 'Admin Principal', email: 'admin@hospital.com', role: Role.ADMIN, avatar: 'AP', lastLogin: 'Hace 5 min' },
+  { id: 'USR-002', name: 'Dr. Carlos Benitez', email: 'cbenitez@hospital.com', role: Role.COORDINATOR, avatar: 'CB', lastLogin: 'Hace 1 hora' },
+  { id: 'USR-003', name: 'Lic. Marta Gomez', email: 'mgomez@hospital.com', role: Role.ADMISSION, avatar: 'MG', lastLogin: 'Hace 2 horas' },
+  { id: 'USR-004', name: 'Aux. Roberto Perez', email: 'rperez@hospital.com', role: Role.HOUSEKEEPING, avatar: 'RP', lastLogin: 'Hace 10 min' },
+  { id: 'USR-005', name: 'Cam. Juan Soto', email: 'jsoto@hospital.com', role: Role.NURSING, avatar: 'JS', lastLogin: 'Hoy, 09:00' },
+];
+
 // --- TYPES & ENUMS ---
-type ViewMode = 'HOME' | 'REQUESTS';
+type ViewMode = 'HOME' | 'REQUESTS' | 'USERS';
+type SortKey = 'status' | 'patientName' | 'origin' | 'createdAt';
+type SortDirection = 'asc' | 'desc';
+
+interface SortConfig {
+  key: SortKey;
+  direction: SortDirection;
+}
+
+// --- UTILS ---
+const getTimeDiffInMinutes = (start: string, end: string) => {
+  const [h1, m1] = start.split(':').map(Number);
+  const [h2, m2] = end.split(':').map(Number);
+  const date1 = new Date(2000, 0, 1, h1, m1);
+  const date2 = new Date(2000, 0, 1, h2, m2);
+  const diffMs = date2.getTime() - date1.getTime();
+  return Math.round(diffMs / 60000);
+};
 
 // --- MAIN COMPONENT ---
 
@@ -87,7 +132,13 @@ export default function App() {
   // --- STATE ---
   const [currentView, setCurrentView] = useState<ViewMode>('HOME');
   const [activeRole, setActiveRole] = useState<Role>(Role.COORDINATOR);
+  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
   
+  // Sorting State
+  const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'createdAt', direction: 'desc' });
+
   // Layout State
   const [isSidebarOpen, setSidebarOpen] = useState(false); // Mobile Menu
   const [isChatOpen, setChatOpen] = useState(true); // Desktop Chat Toggle
@@ -114,6 +165,7 @@ export default function App() {
        workflow: WorkflowType.INTERNAL,
        status: TicketStatus.CLEANING_REQUIRED,
        createdAt: '10:30',
+       bedAssignedAt: '10:42', // 12 mins wait
        isBedClean: false,
        isReasonValidated: false
     }
@@ -124,10 +176,12 @@ export default function App() {
   // Modal State
   const [isNewRequestOpen, setIsNewRequestOpen] = useState(false);
   const [isAssignBedOpen, setIsAssignBedOpen] = useState(false);
+  const [isConfirmCompleteOpen, setIsConfirmCompleteOpen] = useState(false);
   
   // Temporary state for actions
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [bedInput, setBedInput] = useState('');
+  const [ticketToComplete, setTicketToComplete] = useState<string | null>(null);
 
   // Form State
   const [formWorkflow, setFormWorkflow] = useState<WorkflowType>(WorkflowType.INTERNAL);
@@ -135,6 +189,19 @@ export default function App() {
   const [formOrigin, setFormOrigin] = useState('');
   const [formItrSource, setFormItrSource] = useState<'GUARDIA' | 'SISTEMA' | 'ADMISION'>('GUARDIA');
   const [formChangeReason, setFormChangeReason] = useState<'FAMILIAR' | 'AISLAMIENTO' | 'MANTENIMIENTO'>('FAMILIAR');
+
+  const notificationsRef = useRef<HTMLDivElement>(null);
+
+  // Close notifications on click outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (notificationsRef.current && !notificationsRef.current.contains(event.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Check screen size on mount to auto-close chat on small screens
   useEffect(() => {
@@ -145,15 +212,37 @@ export default function App() {
         setChatOpen(true);
       }
     };
-    
-    // Initial check
     handleResize();
-    
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // --- CALCULATIONS ---
+  const averageWaitTime = useMemo(() => {
+    const assignedTickets = tickets.filter(t => t.bedAssignedAt && t.createdAt);
+    if (assignedTickets.length === 0) return 0;
+    
+    const totalMinutes = assignedTickets.reduce((sum, t) => {
+      return sum + getTimeDiffInMinutes(t.createdAt, t.bedAssignedAt!);
+    }, 0);
+    
+    return Math.round(totalMinutes / assignedTickets.length);
+  }, [tickets]);
+
   // --- ACTIONS ---
+
+  const addNotification = (type: NotificationType, title: string, message: string, ticketId?: string) => {
+    const newNotif: Notification = {
+      id: Math.random().toString(36).substr(2, 9),
+      type,
+      title,
+      message,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      isRead: false,
+      ticketId
+    };
+    setNotifications(prev => [newNotif, ...prev]);
+  };
 
   const addSystemMessage = (text: string, role: Role, sender: string) => {
     const newMsg: ChatMessage = {
@@ -165,6 +254,13 @@ export default function App() {
       isSystem: true,
     };
     setChatMessages(prev => [...prev, newMsg]);
+  };
+
+  const handleUpdateUserRole = (userId: string, newRole: Role) => {
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
+    const user = users.find(u => u.id === userId);
+    addSystemMessage(`Rol de ${user?.name} cambiado a ${ROLE_LABELS[newRole]}.`, Role.ADMIN, 'Admin Sistema');
+    addNotification(NotificationType.ROLE_CHANGE, 'Cambio de Rol', `El usuario ${user?.name} ahora es ${ROLE_LABELS[newRole]}.`);
   };
 
   const handleCreateTicket = (e: React.FormEvent) => {
@@ -193,6 +289,7 @@ export default function App() {
     let logMsg = `Nueva solicitud: ${newTicket.patientName} (${newTicket.origin}).`;
     if (formWorkflow === WorkflowType.ROOM_CHANGE) logMsg += ` Motivo: ${formChangeReason}.`;
     addSystemMessage(logMsg, Role.COORDINATOR, 'Coordinadora');
+    addNotification(NotificationType.NEW_TICKET, 'Nueva Solicitud', `${newTicket.patientName} requiere traslado desde ${newTicket.origin}.`, newTicket.id);
     setCurrentView('REQUESTS');
   };
 
@@ -201,6 +298,7 @@ export default function App() {
       t.id === ticketId ? { ...t, isReasonValidated: true, status: TicketStatus.VALIDATED } : t
     ));
     addSystemMessage(`Motivo validado para ticket #${ticketId}.`, Role.ADMISSION, 'Admisión');
+    addNotification(NotificationType.STATUS_UPDATE, 'Motivo Validado', `El ticket #${ticketId} ha sido validado por Admisión.`, ticketId);
   };
 
   const openAssignBedModal = (ticketId: string) => {
@@ -211,25 +309,33 @@ export default function App() {
 
   const handleAssignBedSubmit = () => {
     if (!selectedTicketId || !bedInput) return;
+    const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     setTickets(prev => prev.map(t => 
-      t.id === selectedTicketId ? { ...t, destination: bedInput, status: TicketStatus.BED_ASSIGNED } : t
+      t.id === selectedTicketId ? { 
+        ...t, 
+        destination: bedInput, 
+        status: TicketStatus.BED_ASSIGNED,
+        bedAssignedAt: nowStr
+      } : t
     ));
     addSystemMessage(`Cama ${bedInput} asignada al ticket #${selectedTicketId}.`, Role.ADMISSION, 'Admisión');
+    addNotification(NotificationType.STATUS_UPDATE, 'Cama Asignada', `Se asignó la cama ${bedInput} para el ticket #${selectedTicketId}.`, selectedTicketId);
     setIsAssignBedOpen(false);
     setSelectedTicketId(null);
   };
 
   const handleHousekeepingAction = (ticketId: string, action: 'mark_dirty' | 'mark_clean') => {
+    let newStatus = TicketStatus.CLEANING_REQUIRED;
+    if (action === 'mark_clean') newStatus = TicketStatus.CLEANING_DONE;
+
     setTickets(prev => prev.map(t => {
       if (t.id !== ticketId) return t;
-      if (action === 'mark_dirty') {
-         return { ...t, isBedClean: false, status: TicketStatus.CLEANING_REQUIRED };
-      } else {
-         return { ...t, isBedClean: true, status: TicketStatus.CLEANING_DONE };
-      }
+      return { ...t, isBedClean: action === 'mark_clean', status: newStatus };
     }));
+
     const msg = action === 'mark_clean' ? 'Habitación confirmada limpia.' : 'Habitación reportada sucia.';
     addSystemMessage(`${msg} Ticket #${ticketId}.`, Role.HOUSEKEEPING, 'Azafata');
+    addNotification(NotificationType.STATUS_UPDATE, action === 'mark_clean' ? 'Cama Lista' : 'Cama Sucia', `El ticket #${ticketId} ahora está ${action === 'mark_clean' ? 'listo' : 'pendiente de limpieza'}.`, ticketId);
   };
 
   const handleStartTransport = (ticketId: string) => {
@@ -237,38 +343,83 @@ export default function App() {
       t.id === ticketId ? { ...t, status: TicketStatus.IN_TRANSIT } : t
     ));
     addSystemMessage(`Iniciando traslado #${ticketId}.`, Role.NURSING, 'Camillero');
+    addNotification(NotificationType.STATUS_UPDATE, 'Traslado Iniciado', `El paciente del ticket #${ticketId} está en tránsito.`, ticketId);
   };
 
-  const handleCompleteTransport = (ticketId: string) => {
+  const openCompleteConfirmation = (ticketId: string) => {
+    setTicketToComplete(ticketId);
+    setIsConfirmCompleteOpen(true);
+  };
+
+  const handleConfirmComplete = () => {
+    if (!ticketToComplete) return;
     setTickets(prev => prev.map(t => 
-      t.id === ticketId ? { ...t, status: TicketStatus.COMPLETED } : t
+      t.id === ticketToComplete ? { ...t, status: TicketStatus.COMPLETED } : t
     ));
-    addSystemMessage(`Traslado completado #${ticketId}.`, Role.NURSING, 'Camillero');
+    addSystemMessage(`Traslado completado #${ticketToComplete}.`, Role.NURSING, 'Camillero');
+    addNotification(NotificationType.STATUS_UPDATE, 'Traslado Finalizado', `El traslado #${ticketToComplete} se completó con éxito.`, ticketToComplete);
+    setIsConfirmCompleteOpen(false);
+    setTicketToComplete(null);
   };
 
-  // --- FILTERS & UTILS ---
-  const filteredTickets = tickets.filter(t => {
-    if (activeRole === Role.COORDINATOR) return true;
-    if (activeRole === Role.ADMISSION) {
-      return t.status === TicketStatus.REQUESTED || 
-             t.status === TicketStatus.VALIDATED ||
-             t.status === TicketStatus.BED_ASSIGNED || 
-             (t.workflow === WorkflowType.ROOM_CHANGE && !t.isReasonValidated);
+  const markAllAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+  };
+
+  const clearNotifications = () => {
+    setNotifications([]);
+    setShowNotifications(false);
+  };
+
+  // --- SORTING LOGIC ---
+
+  const requestSort = (key: SortKey) => {
+    let direction: SortDirection = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
     }
-    if (activeRole === Role.HOUSEKEEPING) {
-      return t.status === TicketStatus.BED_ASSIGNED || 
-             t.status === TicketStatus.CLEANING_REQUIRED || 
-             t.status === TicketStatus.CLEANING_DONE;
-    }
-    if (activeRole === Role.NURSING) {
-      return t.status === TicketStatus.CLEANING_DONE || 
-             t.status === TicketStatus.IN_TRANSIT;
-    }
-    return false;
-  });
+    setSortConfig({ key, direction });
+  };
+
+  const sortedTickets = useMemo(() => {
+    const roleFiltered = tickets.filter(t => {
+      if (activeRole === Role.COORDINATOR || activeRole === Role.ADMIN) return true;
+      if (activeRole === Role.ADMISSION) {
+        return t.status === TicketStatus.REQUESTED || 
+               t.status === TicketStatus.VALIDATED ||
+               t.status === TicketStatus.BED_ASSIGNED || 
+               (t.workflow === WorkflowType.ROOM_CHANGE && !t.isReasonValidated);
+      }
+      if (activeRole === Role.HOUSEKEEPING) {
+        return t.status === TicketStatus.BED_ASSIGNED || 
+               t.status === TicketStatus.CLEANING_REQUIRED || 
+               t.status === TicketStatus.CLEANING_DONE;
+      }
+      if (activeRole === Role.NURSING) {
+        return t.status === TicketStatus.CLEANING_DONE || 
+               t.status === TicketStatus.IN_TRANSIT;
+      }
+      return false;
+    });
+
+    const sortableItems = [...roleFiltered];
+    sortableItems.sort((a, b) => {
+      const aVal = a[sortConfig.key] || '';
+      const bVal = b[sortConfig.key] || '';
+
+      if (aVal < bVal) {
+        return sortConfig.direction === 'asc' ? -1 : 1;
+      }
+      if (aVal > bVal) {
+        return sortConfig.direction === 'asc' ? 1 : -1;
+      }
+      return 0;
+    });
+    return sortableItems;
+  }, [tickets, activeRole, sortConfig]);
 
   const renderActionCell = (ticket: Ticket) => {
-    if (activeRole === Role.COORDINATOR) return <span className="text-slate-400 text-xs italic">Monitoreo</span>;
+    if (activeRole === Role.COORDINATOR || activeRole === Role.ADMIN) return <span className="text-slate-400 text-xs italic">Monitoreo</span>;
     if (activeRole === Role.ADMISSION) {
         if (ticket.workflow === WorkflowType.ROOM_CHANGE && !ticket.isReasonValidated) {
             return (
@@ -321,7 +472,7 @@ export default function App() {
         }
         if (ticket.status === TicketStatus.IN_TRANSIT) {
              return (
-                <Button size="sm" className="bg-green-600 hover:bg-green-700 h-8 text-xs" onClick={() => handleCompleteTransport(ticket.id)}>
+                <Button size="sm" className="bg-green-600 hover:bg-green-700 h-8 text-xs" onClick={() => openCompleteConfirmation(ticket.id)}>
                     <ClipboardCheck className="w-3 h-3 mr-1" /> Confirmar
                 </Button>
             );
@@ -337,7 +488,6 @@ export default function App() {
 
     return (
         <div className="p-4 lg:p-8 space-y-8 animate-in fade-in duration-500 max-w-7xl mx-auto">
-            {/* Stats Summary - Now top right aligned or just simplified */}
             <div className="flex justify-end mb-4">
                  <Card className="w-full md:w-auto p-4 bg-white border-slate-200 shadow-sm flex items-center gap-4">
                     <div className="bg-blue-100 p-2 rounded-full text-blue-600">
@@ -426,24 +576,143 @@ export default function App() {
     );
   };
 
+  const UserManagementView = () => {
+    return (
+        <div className="p-4 md:p-8 animate-in slide-in-from-right-4 duration-300 max-w-full">
+            <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 bg-slate-900 rounded-xl flex items-center justify-center text-white shadow-lg">
+                        <UserCog className="w-6 h-6" />
+                    </div>
+                    <div>
+                        <h2 className="text-2xl font-bold text-slate-800">Gestión de Usuarios</h2>
+                        <p className="text-sm text-slate-500 font-medium">Asigna roles y permisos granulares</p>
+                    </div>
+                </div>
+                <Button className="bg-slate-900 hover:bg-slate-800 shadow-md">
+                    <Plus className="w-4 h-4 mr-2" />
+                    Nuevo Usuario
+                </Button>
+            </div>
+
+            <Card className="shadow-sm border-slate-200 overflow-hidden">
+                <div className="overflow-x-auto">
+                    <Table>
+                        <TableHeader className="bg-slate-50 border-b border-slate-200">
+                            <TableRow>
+                                <TableHead className="w-[300px]">Usuario</TableHead>
+                                <TableHead>Email</TableHead>
+                                <TableHead>Rol Asignado</TableHead>
+                                <TableHead>Último Acceso</TableHead>
+                                <TableHead className="text-right">Acciones</TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {users.map((user) => (
+                                <TableRow key={user.id} className="hover:bg-slate-50/50 transition-colors">
+                                    <TableCell>
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-9 h-9 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600 shadow-sm">
+                                                {user.avatar}
+                                            </div>
+                                            <div>
+                                                <div className="font-semibold text-slate-900">{user.name}</div>
+                                                <div className="text-[10px] font-mono text-slate-400">{user.id}</div>
+                                            </div>
+                                        </div>
+                                    </TableCell>
+                                    <TableCell className="text-sm text-slate-600">
+                                        {user.email}
+                                    </TableCell>
+                                    <TableCell>
+                                        <Select 
+                                            value={user.role} 
+                                            onValueChange={(val) => handleUpdateUserRole(user.id, val as Role)}
+                                        >
+                                            <SelectTrigger className="w-[160px] h-8 text-xs bg-white border-slate-200 font-medium">
+                                                <SelectValue placeholder={ROLE_LABELS[user.role]} />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value={Role.ADMIN}>{ROLE_LABELS[Role.ADMIN]}</SelectItem>
+                                                <SelectItem value={Role.COORDINATOR}>{ROLE_LABELS[Role.COORDINATOR]}</SelectItem>
+                                                <SelectItem value={Role.ADMISSION}>{ROLE_LABELS[Role.ADMISSION]}</SelectItem>
+                                                <SelectItem value={Role.HOUSEKEEPING}>{ROLE_LABELS[Role.HOUSEKEEPING]}</SelectItem>
+                                                <SelectItem value={Role.NURSING}>{ROLE_LABELS[Role.NURSING]}</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </TableCell>
+                                    <TableCell className="text-xs text-slate-500">
+                                        {user.lastLogin}
+                                    </TableCell>
+                                    <TableCell className="text-right">
+                                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-slate-400 hover:text-slate-900">
+                                            <Settings className="w-4 h-4" />
+                                        </Button>
+                                    </TableCell>
+                                </TableRow>
+                            ))}
+                        </TableBody>
+                    </Table>
+                </div>
+            </Card>
+        </div>
+    );
+  };
+
+  const SortHeader = ({ label, sortKey }: { label: string, sortKey: SortKey }) => {
+    const isActive = sortConfig.key === sortKey;
+    return (
+        <TableHead 
+            className="cursor-pointer hover:bg-slate-100/80 transition-colors select-none group"
+            onClick={() => requestSort(sortKey)}
+        >
+            <div className="flex items-center gap-1.5">
+                <span className={isActive ? "text-slate-900 font-bold" : ""}>{label}</span>
+                <div className="flex flex-col opacity-30 group-hover:opacity-100 transition-opacity">
+                    {!isActive ? (
+                        <ArrowUpDown className="w-3 h-3" />
+                    ) : sortConfig.direction === 'asc' ? (
+                        <ChevronUp className="w-3 h-3 text-slate-900" />
+                    ) : (
+                        <ChevronDown className="w-3 h-3 text-slate-900" />
+                    )}
+                </div>
+            </div>
+        </TableHead>
+    );
+  };
+
   const RequestsView = () => {
     return (
         <div className="p-4 md:p-8 animate-in slide-in-from-right-4 duration-300 max-w-full">
-             <div className="flex flex-col sm:flex-row items-center justify-between mb-6 gap-4">
-                 <div className="flex items-center gap-2 w-full sm:w-auto bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 pl-2 whitespace-nowrap">Rol Activo:</span>
-                    <Tabs value={activeRole} onValueChange={(val) => setActiveRole(val as Role)} className="w-full sm:w-auto">
-                        <TabsList className="bg-slate-100 h-8 w-full sm:w-auto">
-                            <TabsTrigger value={Role.COORDINATOR} className="h-6 text-xs flex-1 sm:flex-none">Coord.</TabsTrigger>
-                            <TabsTrigger value={Role.ADMISSION} className="h-6 text-xs flex-1 sm:flex-none">Admisión</TabsTrigger>
-                            <TabsTrigger value={Role.HOUSEKEEPING} className="h-6 text-xs flex-1 sm:flex-none">Higiene</TabsTrigger>
-                            <TabsTrigger value={Role.NURSING} className="h-6 text-xs flex-1 sm:flex-none">Enfermería</TabsTrigger>
-                        </TabsList>
-                    </Tabs>
+             <div className="flex flex-col lg:flex-row items-center justify-between mb-6 gap-4">
+                 <div className="flex flex-col sm:flex-row items-center gap-4 w-full lg:w-auto">
+                    <div className="flex items-center gap-2 w-full sm:w-auto bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 pl-2 whitespace-nowrap">Simular Rol:</span>
+                        <Tabs value={activeRole} onValueChange={(val) => setActiveRole(val as Role)} className="w-full sm:w-auto">
+                            <TabsList className="bg-slate-100 h-8 w-full sm:w-auto">
+                                <TabsTrigger value={Role.ADMIN} className="h-6 text-[10px] flex-1 sm:flex-none">Admin</TabsTrigger>
+                                <TabsTrigger value={Role.COORDINATOR} className="h-6 text-[10px] flex-1 sm:flex-none">Coord.</TabsTrigger>
+                                <TabsTrigger value={Role.ADMISSION} className="h-6 text-[10px] flex-1 sm:flex-none">Admisión</TabsTrigger>
+                                <TabsTrigger value={Role.HOUSEKEEPING} className="h-6 text-[10px] flex-1 sm:flex-none">Higiene</TabsTrigger>
+                                <TabsTrigger value={Role.NURSING} className="h-6 text-[10px] flex-1 sm:flex-none">Enf.</TabsTrigger>
+                            </TabsList>
+                        </Tabs>
+                    </div>
+
+                    <div className="flex items-center gap-3 px-4 py-2 bg-emerald-50 border border-emerald-100 rounded-lg shadow-sm whitespace-nowrap w-full sm:w-auto">
+                        <div className="p-1.5 bg-emerald-100 rounded-full text-emerald-600">
+                            <Timer className="w-4 h-4" />
+                        </div>
+                        <div>
+                            <p className="text-[10px] uppercase font-bold text-emerald-600 leading-tight">Espera Promedio</p>
+                            <p className="text-sm font-bold text-emerald-900 leading-tight">{averageWaitTime || '--'} min</p>
+                        </div>
+                    </div>
                  </div>
 
-                 {(activeRole === Role.COORDINATOR || activeRole === Role.ADMISSION) && (
-                    <Button onClick={() => setIsNewRequestOpen(true)} size="sm" className="bg-slate-900 hover:bg-slate-800 w-full sm:w-auto shadow-sm">
+                 {(activeRole === Role.COORDINATOR || activeRole === Role.ADMISSION || activeRole === Role.ADMIN) && (
+                    <Button onClick={() => setIsNewRequestOpen(true)} size="sm" className="bg-slate-900 hover:bg-slate-800 w-full lg:w-auto shadow-sm">
                         <Plus className="w-3 h-3 mr-2" />
                         Nueva Solicitud
                     </Button>
@@ -455,16 +724,16 @@ export default function App() {
                <Table>
                  <TableHeader className="bg-slate-50 border-b border-slate-200">
                    <TableRow>
-                     <TableHead className="w-[100px] whitespace-nowrap">Estado</TableHead>
-                     <TableHead className="min-w-[150px]">Paciente</TableHead>
-                     <TableHead className="whitespace-nowrap">Origen</TableHead>
-                     <TableHead className="whitespace-nowrap">Destino</TableHead>
+                     <SortHeader label="Estado" sortKey="status" />
+                     <SortHeader label="Paciente" sortKey="patientName" />
+                     <SortHeader label="Origen" sortKey="origin" />
+                     <SortHeader label="Hora" sortKey="createdAt" />
                      <TableHead className="min-w-[140px]">Detalles</TableHead>
                      <TableHead className="text-right whitespace-nowrap">Acciones</TableHead>
                    </TableRow>
                  </TableHeader>
                  <TableBody>
-                   {filteredTickets.length === 0 ? (
+                   {sortedTickets.length === 0 ? (
                      <TableRow>
                        <TableCell colSpan={6} className="h-48 text-center text-slate-500 bg-white">
                           <div className="flex flex-col items-center justify-center gap-3">
@@ -474,7 +743,7 @@ export default function App() {
                        </TableCell>
                      </TableRow>
                    ) : (
-                     filteredTickets.map((ticket) => (
+                     sortedTickets.map((ticket) => (
                        <TableRow key={ticket.id} className="group hover:bg-slate-50/60 transition-colors">
                          <TableCell>
                            <StatusBadge status={ticket.status} />
@@ -484,18 +753,28 @@ export default function App() {
                             <div className="text-[10px] text-slate-400 font-mono">{ticket.id}</div>
                          </TableCell>
                          <TableCell>
-                            <div className="flex items-center gap-2 text-slate-600 text-sm">
+                            <div className="text-slate-600 text-sm">
                                 {ticket.origin}
                             </div>
+                            {ticket.destination && (
+                                <div className="flex items-center gap-1 mt-1">
+                                    <ArrowRightLeft className="w-2.5 h-2.5 text-slate-400" />
+                                    <span className="text-[10px] font-bold text-slate-500">{ticket.destination}</span>
+                                </div>
+                            )}
                          </TableCell>
                          <TableCell>
-                           {ticket.destination ? (
-                             <span className="font-mono bg-slate-100 px-2 py-1 rounded text-slate-800 font-semibold border border-slate-200 text-xs">
-                                {ticket.destination}
-                             </span>
-                           ) : (
-                             <span className="text-slate-400 italic text-xs">--</span>
-                           )}
+                            <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-1.5 text-slate-500 text-xs">
+                                    <Clock className="w-3 h-3" />
+                                    {ticket.createdAt}
+                                </div>
+                                {ticket.bedAssignedAt && (
+                                    <Badge variant="outline" className="text-[9px] py-0 px-1 border-emerald-100 bg-emerald-50 text-emerald-600 font-normal">
+                                        Cama: {ticket.bedAssignedAt}
+                                    </Badge>
+                                )}
+                            </div>
                          </TableCell>
                          <TableCell>
                            <div className="flex flex-col gap-1.5 items-start">
@@ -506,11 +785,6 @@ export default function App() {
                              {ticket.changeReason && (
                                <Badge variant="warning" className="text-[10px] font-medium border border-amber-200/50">
                                  {ticket.changeReason}
-                               </Badge>
-                             )}
-                             {ticket.itrSource && (
-                               <Badge variant="info" className="text-[10px] font-medium border border-blue-200/50">
-                                 {ticket.itrSource}
                                </Badge>
                              )}
                            </div>
@@ -539,7 +813,7 @@ export default function App() {
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all ${currentView === 'HOME' ? 'bg-zinc-800 text-white shadow-lg shadow-zinc-900/20' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100'}`}
         >
             <HomeIcon className="w-4 h-4" />
-            Home
+            Dashboard
         </button>
         <button 
             onClick={() => { setCurrentView('REQUESTS'); setSidebarOpen(false); }}
@@ -548,16 +822,39 @@ export default function App() {
             <LayoutDashboard className="w-4 h-4" />
             Solicitudes
         </button>
+
+        {activeRole === Role.ADMIN && (
+            <div className="pt-4 mt-4 border-t border-zinc-900">
+                <p className="px-3 text-[10px] uppercase font-bold text-zinc-500 tracking-wider mb-2">Administración</p>
+                <button 
+                    onClick={() => { setCurrentView('USERS'); setSidebarOpen(false); }}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all ${currentView === 'USERS' ? 'bg-emerald-700 text-white shadow-lg shadow-emerald-900/20' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100'}`}
+                >
+                    <ShieldCheck className="w-4 h-4" />
+                    Gestión Usuarios
+                </button>
+            </div>
+        )}
     </>
   );
 
   // --- RENDER APP LAYOUT ---
 
+  const renderCurrentView = () => {
+    switch (currentView) {
+        case 'HOME': return <HomeView />;
+        case 'REQUESTS': return <RequestsView />;
+        case 'USERS': return <UserManagementView />;
+        default: return <HomeView />;
+    }
+  };
+
+  const unreadCount = notifications.filter(n => !n.isRead).length;
+
   return (
     <div className="h-screen w-full flex bg-slate-100 overflow-hidden font-sans text-slate-900">
       
       {/* 1. SIDEBAR NAVIGATION */}
-      {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-56 bg-zinc-950 text-zinc-300 flex-col shrink-0 border-r border-zinc-800 z-20">
          <div className="h-16 flex items-center px-6 border-b border-zinc-900 bg-zinc-950">
             <Activity className="w-5 h-5 text-white mr-3" />
@@ -605,20 +902,90 @@ export default function App() {
         {/* Header */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 lg:px-8 shadow-sm shrink-0 z-10">
              <div className="flex items-center gap-4">
-                 {/* Mobile Menu Button */}
                  <Button variant="ghost" size="icon" className="md:hidden text-slate-500" onClick={() => setSidebarOpen(true)}>
                      <Menu className="w-5 h-5" />
                  </Button>
                  
                  <h1 className="text-lg md:text-xl font-bold text-slate-800 truncate">
-                    {currentView === 'HOME' ? 'Bienvenido a MediFlow' : 'Solicitudes'}
+                    {currentView === 'HOME' ? 'Dashboard Operativo' : 
+                     currentView === 'REQUESTS' ? 'Centro de Solicitudes' : 'Gestión de Personal'}
                  </h1>
              </div>
 
-             <div className="flex items-center gap-3 md:gap-6">
-                <div className="hidden md:flex items-center gap-2 text-xs font-medium text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full border border-slate-200">
+             <div className="flex items-center gap-3 md:gap-4 lg:gap-6">
+                <div className="hidden lg:flex items-center gap-2 text-xs font-medium text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full border border-slate-200">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                     Sistema Online
+                </div>
+
+                {/* Notification Bell */}
+                <div className="relative" ref={notificationsRef}>
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className={`relative text-slate-600 hover:bg-slate-100 ${showNotifications ? 'bg-slate-100' : ''}`}
+                    onClick={() => {
+                        setShowNotifications(!showNotifications);
+                        if (!showNotifications) markAllAsRead();
+                    }}
+                  >
+                    <Bell className="w-5 h-5" />
+                    {unreadCount > 0 && (
+                      <span className="absolute top-1 right-1 w-4 h-4 bg-red-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-white">
+                        {unreadCount}
+                      </span>
+                    )}
+                  </Button>
+
+                  {showNotifications && (
+                    <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white border border-slate-200 shadow-2xl rounded-lg z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                      <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                        <h4 className="font-bold text-slate-900 text-sm">Notificaciones</h4>
+                        <Button variant="ghost" size="sm" className="h-7 text-[10px] px-2 text-slate-500 hover:text-red-600" onClick={clearNotifications}>
+                          Limpiar todo
+                        </Button>
+                      </div>
+                      <div className="max-h-96 overflow-y-auto">
+                        {notifications.length === 0 ? (
+                          <div className="p-8 text-center text-slate-400">
+                            <Info className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                            <p className="text-sm">Sin notificaciones nuevas</p>
+                          </div>
+                        ) : (
+                          notifications.map((n) => (
+                            <div key={n.id} className="p-4 border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                              <div className="flex gap-3">
+                                <div className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+                                  n.type === NotificationType.NEW_TICKET ? 'bg-amber-100 text-amber-600' :
+                                  n.type === NotificationType.STATUS_UPDATE ? 'bg-blue-100 text-blue-600' :
+                                  'bg-emerald-100 text-emerald-600'
+                                }`}>
+                                  {n.type === NotificationType.NEW_TICKET ? <Plus className="w-4 h-4" /> :
+                                   n.type === NotificationType.STATUS_UPDATE ? <Activity className="w-4 h-4" /> :
+                                   <UserCog className="w-4 h-4" />}
+                                </div>
+                                <div className="flex-1">
+                                  <div className="flex items-center justify-between mb-0.5">
+                                    <span className="font-bold text-xs text-slate-900">{n.title}</span>
+                                    <span className="text-[10px] text-slate-400 font-medium">{n.timestamp}</span>
+                                  </div>
+                                  <p className="text-xs text-slate-600 leading-normal">{n.message}</p>
+                                  {n.ticketId && (
+                                    <button 
+                                      className="text-[10px] font-bold text-blue-600 mt-2 hover:underline"
+                                      onClick={() => { setCurrentView('REQUESTS'); setShowNotifications(false); }}
+                                    >
+                                      Ver ticket {n.ticketId}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 
                 {/* Chat Toggle Button */}
@@ -640,12 +1007,11 @@ export default function App() {
 
         {/* Scrollable Content */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden">
-            {currentView === 'HOME' ? <HomeView /> : <RequestsView />}
+            {renderCurrentView()}
         </main>
       </div>
 
       {/* 3. RIGHT SIDEBAR (Chat) */}
-      {/* Desktop: Collapsible / Mobile: Overlay handled differently if needed, but here simple toggle */}
       {isChatOpen && (
           <div className="hidden lg:block animate-in slide-in-from-right duration-300">
              <ChatSidebar messages={chatMessages} />
@@ -791,6 +1157,37 @@ export default function App() {
               <Button variant="outline" onClick={() => setIsAssignBedOpen(false)}>Cancelar</Button>
               <Button onClick={handleAssignBedSubmit} className="bg-purple-600 hover:bg-purple-700">Confirmar</Button>
            </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm Complete Modal */}
+      <Dialog open={isConfirmCompleteOpen} onOpenChange={setIsConfirmCompleteOpen}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+               <AlertCircle className="w-5 h-5 text-amber-500" />
+               Confirmar Finalización
+            </DialogTitle>
+            <DialogDescription>
+               ¿Estás seguro de que deseas marcar este traslado como <strong>COMPLETADO</strong>? Esta acción notificará a todos los sectores y cerrará el ticket.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="bg-slate-50 p-3 rounded border border-slate-200 text-sm">
+             <div className="flex justify-between mb-1">
+                <span className="text-slate-500">Ticket:</span>
+                <span className="font-mono font-bold">{ticketToComplete}</span>
+             </div>
+             <div className="flex justify-between">
+                <span className="text-slate-500">Paciente:</span>
+                <span className="font-semibold">{tickets.find(t => t.id === ticketToComplete)?.patientName}</span>
+             </div>
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setIsConfirmCompleteOpen(false)}>Volver</Button>
+            <Button onClick={handleConfirmComplete} className="bg-green-600 hover:bg-green-700">
+               Confirmar Entrega
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

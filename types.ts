@@ -9,16 +9,16 @@ export enum Role {
   ADMISSION = 'ADMISSION', // Gestión de Cama / Censo
   HOUSEKEEPING = 'HOUSEKEEPING', // Azafata
   NURSING = 'NURSING', // Enfermería / Camillero
+  ADMIN = 'ADMIN', // Gestión de Usuarios y Permisos
 }
 
-export enum TicketStatus {
-  REQUESTED = 'REQUESTED',
-  VALIDATED = 'VALIDATED', // Solo para Cambio de Habitación
-  BED_ASSIGNED = 'BED_ASSIGNED',
-  CLEANING_REQUIRED = 'CLEANING_REQUIRED',
-  CLEANING_DONE = 'CLEANING_DONE',
-  IN_TRANSIT = 'IN_TRANSIT',
-  COMPLETED = 'COMPLETED',
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  avatar: string;
+  lastLogin: string;
 }
 
 export interface ChatMessage {
@@ -30,6 +30,23 @@ export interface ChatMessage {
   isSystem?: boolean;
 }
 
+export enum NotificationType {
+  NEW_TICKET = 'NEW_TICKET',
+  STATUS_UPDATE = 'STATUS_UPDATE',
+  ROLE_CHANGE = 'ROLE_CHANGE',
+  SYSTEM = 'SYSTEM',
+}
+
+export interface Notification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  timestamp: string;
+  isRead: boolean;
+  ticketId?: string;
+}
+
 export interface Ticket {
   id: string;
   patientName: string;
@@ -38,6 +55,7 @@ export interface Ticket {
   workflow: WorkflowType;
   status: TicketStatus;
   createdAt: string;
+  bedAssignedAt?: string; // Timestamp for wait time calculation
   
   // Workflow specific fields
   itrSource?: 'GUARDIA' | 'SISTEMA' | 'ADMISION' | 'RECEPCION';
@@ -46,4 +64,14 @@ export interface Ticket {
   // Flags
   isBedClean: boolean;
   isReasonValidated: boolean; // Para flujo 3
+}
+
+export enum TicketStatus {
+  REQUESTED = 'REQUESTED',
+  VALIDATED = 'VALIDATED', // Solo para Cambio de Habitación
+  BED_ASSIGNED = 'BED_ASSIGNED',
+  CLEANING_REQUIRED = 'CLEANING_REQUIRED',
+  CLEANING_DONE = 'CLEANING_DONE',
+  IN_TRANSIT = 'IN_TRANSIT',
+  COMPLETED = 'COMPLETED',
 }
